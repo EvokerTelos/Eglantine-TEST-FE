@@ -103,8 +103,11 @@ void main() {
             sum += sample_color;
             squares += sample_color * sample_color;
             // The longest motion around the pixel, so that an edge follows the object in front.
+            // The same place in the motion vectors, which may be scaled differently from the colour.
+            const ivec2 motion_texel =
+                ivec2((vec2(texel) + 0.5) * vec2(motion_size) / vec2(input_size));
             const vec2 candidate =
-                texelFetch(motion_vectors, clamp(texel, ivec2(0), motion_size - 1), 0).rg;
+                texelFetch(motion_vectors, clamp(motion_texel, ivec2(0), motion_size - 1), 0).rg;
             const float length_squared = dot(candidate, candidate);
             if (length_squared > longest) {
                 longest = length_squared;

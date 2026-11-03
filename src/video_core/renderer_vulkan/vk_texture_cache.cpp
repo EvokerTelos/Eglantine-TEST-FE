@@ -1544,7 +1544,15 @@ bool TextureCacheRuntime::TemporalUpscale(Framebuffer* dst_framebuffer, ImageVie
     }
     const VkFormat format =
         MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, dst.format).format;
-    const VkExtent2D extent{dst.size.width, dst.size.height};
+    // With resolution scaling the output (and so the history) is larger than its guest size, and
+    // the jitter, given in guest input pixels, spans more host pixels of a rescaled input.
+    const bool dst_rescaled = dst.IsRescaled();
+    const VkExtent2D extent{dst_rescaled ? resolution.ScaleUp(dst.size.width) : dst.size.width,
+                            dst_rescaled ? resolution.ScaleUp(dst.size.height) : dst.size.height};
+    if (input_color.IsRescaled()) {
+        jitter[0] *= resolution.up_factor;
+        jitter[1] *= resolution.up_factor;
+    }
     const VkImage output = dst.ImageHandle();
     bool reset = false;
     if (!temporal_history.image || temporal_history.format != format ||

@@ -1131,9 +1131,10 @@ bool TextureCache<P>::TemporalUpscale(const Tegra::Engines::Fermi2D::Surface& ds
         PrepareImage(src_id, false, false);
         PrepareImage(motion_id, false, false);
         PrepareImage(dst_id, true, false);
+        // Rescaled images are fine: the runtime works in each image's host size. Refusing them
+        // fell back to a plain blit, which shows every frame's camera jitter (the image shakes).
         for (const ImageId id : {src_id, motion_id, dst_id}) {
-            if (True(slot_images[id].flags & ImageFlagBits::Rescaled) ||
-                slot_images[id].info.num_samples != 1) {
+            if (slot_images[id].info.num_samples != 1) {
                 return false;
             }
         }
