@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 
 #include "video_core/host_shaders/dlss_network_probe_comp_spv.h"

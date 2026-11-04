@@ -55,6 +55,14 @@ void OnBack(const Func& func) {
     }
 }
 
+bool AcquireFastPath() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_ACQUIRE_FAST");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
 void DrainBack() {
     VideoCommon::GpuSplit::Get().Drain();
 }
@@ -245,6 +253,15 @@ void Puller::ProcessSemaphoreTriggerMethod(DmaPusher& dma_pusher) {
             return;
         }
         VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireChecks, 1);
+        // A greater-or-equal acquire already met in guest memory is met: a newer value only the
+        // back's caches hold can only be larger (sequence counters). Skipping the drain lets the
+        // front keep parsing while the back draws (most acquires wait on values the CPU released
+        // long ago). EDEN_NX2_ACQUIRE_FAST=0 turns it off.
+        if (op == GpuSemaphoreOperation::AcquireGequal && AcquireFastPath() &&
+            acquire.Matches(dma_pusher.memory_manager.Read<u32>(acquire.address))) {
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::AcquireFast, 1);
+            return;
+        }
         DrainBack();
         if (acquire.Matches(ReadSemaphoreWord(dma_pusher, acquire.address))) {
             return;
