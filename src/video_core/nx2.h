@@ -63,6 +63,10 @@ inline void Nx2MarkCommandListPage(u64 device_address) {
     }
 }
 
+[[nodiscard]] inline bool Nx2HasCommandListPages() {
+    return g_nx2_has_command_list_pages.load(std::memory_order_relaxed);
+}
+
 [[nodiscard]] inline bool Nx2IsCommandListPage(u64 device_address) {
     const u64 page = device_address >> Nx2WrittenPageBits;
     if (page >= g_nx2_command_list_pages.size() * 64) {

@@ -51,6 +51,7 @@ enum class Zone : u32 {
     Method,       ///< Engine method calls (what a split GPU thread's back half would run)
     SplitDrain,   ///< Split GPU thread: the front waits for the back (gpu_split.h)
     SplitWait,    ///< Split GPU thread: the back waits for work
+    SplitWriters, ///< Split GPU thread: the front waits for queued compute/copy work (WaitForWriters)
     Count,
 };
 
@@ -61,7 +62,7 @@ inline constexpr std::array<const char*, static_cast<size_t>(Zone::Count)> zone_
     "sync descriptors", "read handles", "fill image views", "texture buffers", "update buffers",
     "descriptor acquire", "bind stage buffers", "push descriptors", "render targets",
     "configure draw", "dynamic state", "draw record", "texture upload", "fence",
-    "fence skipped", "method", "split drain", "split wait",
+    "fence skipped", "method", "split drain", "split wait", "split writers",
 };
 
 // Read once at startup: Enabled() runs several times per method write (no guard to check).

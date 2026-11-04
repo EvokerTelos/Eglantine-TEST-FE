@@ -27,6 +27,29 @@
 
 namespace Tegra {
 
+namespace {
+// Before reading each command list the front waits for queued compute and copy work, in case it
+// writes the list's pages for the first time (GPU culling filling in draw arguments). A game
+// whose lists never land on GPU-written pages pays that wait on every list for nothing: after
+// EDEN_NX2_WRITER_LEARN lists (default 20000; 0 = always wait) without one, stop waiting. A list
+// on a page already known as GPU-written still takes the flushing path (IsGpuWrittenCommands).
+bool WriterWaitNeeded() {
+    static const u64 learn = [] {
+        const char* const value = std::getenv("EDEN_NX2_WRITER_LEARN");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) : u64{20000};
+    }();
+    static u64 checked{};
+    if (learn == 0 || Nx2HasCommandListPages()) {
+        return true;
+    }
+    if (checked < learn) {
+        ++checked;
+        return true;
+    }
+    return false;
+}
+} // namespace
+
 constexpr u32 MacroRegistersStart = 0xE00;
 constexpr u32 ComputeInline = 0x6D;
 
@@ -178,7 +201,7 @@ bool DmaPusher::Step() {
         // billions of instances and lost the device loading a race).
         bool gpu_written =
             IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));
-        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() &&
+        if (!gpu_written && VideoCommon::GpuSplit::Get().Active() && WriterWaitNeeded() &&
             VideoCommon::GpuSplit::Get().WaitForWriters()) {
             gpu_written =
                 IsGpuWrittenCommands(dma_state.dma_get, size_t{header.size} * sizeof(u32));

@@ -225,6 +225,7 @@ bool GpuSplit::WaitForWriters() {
     }
     wait_target.store(target, std::memory_order_seq_cst);
     Publish();
+    Nx2Profile::Scope scope{Nx2Profile::Zone::SplitWriters};
     for (u32 spins = 0;; ++spins) {
         consumed_cache = consumed.load(std::memory_order_acquire);
         if (consumed_cache >= target) {
