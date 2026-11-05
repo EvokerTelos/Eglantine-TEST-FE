@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
@@ -72,6 +73,71 @@ void NoteHandleTableBytes(GPUVAddr base, std::span<const u8> bytes) {
         ++(slot.hash == hash ? draw_stats.table_same : draw_stats.table_changed);
     }
     slot = {base, hash};
+}
+
+/// Fortune's Weave rebuilds its buffer-backed handle tables with a compute shader every frame,
+/// and the first draw that reads one downloads it, which waits for the GPU (Finish) inside the
+/// draw lock: ~3 times a frame, 1.2-1.7 ms each at 1.5x, ~15-19% of the back thread. The bytes
+/// came back identical every time in the measurements. Once a table has come back the same
+/// several times in a row, most downloads are skipped (the guest memory keeps the last bytes, the
+/// prediction) and one in every few still downloads to check it; a change resets the table to
+/// downloading every time. A wrong prediction shows the previous table for at most that many
+/// reads. EDEN_HANDLE_SPECULATE=0 turns it off; =N checks one read in N (default 4).
+struct HandleTableSpeculation {
+    GPUVAddr base;
+    u64 hash;
+    u32 streak;
+    u32 skipped;
+    bool known;
+};
+
+u32 HandleSpeculationInterval() {
+    static const u32 interval = [] {
+        const char* const value = std::getenv("EDEN_HANDLE_SPECULATE");
+        if (value == nullptr) {
+            return 4U;
+        }
+        const unsigned long parsed = std::strtoul(value, nullptr, 10);
+        return parsed <= 1 ? 0U : static_cast<u32>(std::min<unsigned long>(parsed, 64));
+    }();
+    return interval;
+}
+
+HandleTableSpeculation& HandleSpeculationSlot(GPUVAddr base) {
+    static thread_local std::array<HandleTableSpeculation, 16> slots{};
+    HandleTableSpeculation& slot = slots[(base >> 8) & (slots.size() - 1)];
+    if (slot.base != base) {
+        slot = {base, 0, 0, 0, false};
+    }
+    return slot;
+}
+
+/// Whether this read of the table at base may use the bytes guest memory already holds.
+bool SkipHandleTableDownload(GPUVAddr base) {
+    constexpr u32 min_streak = 32;
+    const u32 interval = HandleSpeculationInterval();
+    if (interval == 0) {
+        return false;
+    }
+    HandleTableSpeculation& slot = HandleSpeculationSlot(base);
+    if (slot.streak < min_streak || slot.skipped + 1 >= interval) {
+        return false;
+    }
+    ++slot.skipped;
+    return true;
+}
+
+/// After a real download: whether the bytes matched the last download decides the next reads.
+void NoteHandleTableDownload(GPUVAddr base, std::span<const u8> bytes) {
+    if (HandleSpeculationInterval() == 0) {
+        return;
+    }
+    HandleTableSpeculation& slot = HandleSpeculationSlot(base);
+    const u64 hash = Common::CityHash64(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    slot.streak = slot.known && slot.hash == hash ? slot.streak + 1 : 0;
+    slot.known = true;
+    slot.hash = hash;
+    slot.skipped = 0;
 }
 
 DescriptorLayoutBuilder MakeBuilder(const Device& device, std::span<const Shader::Info> infos) {
@@ -512,13 +578,19 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                         if (gpu_memory->Read<u64>(root + 8) != source.size || !base ||
                             base + source.size < base || !gpu_memory->IsFullyMappedRange(base, source.size))
                             throw Shader::RuntimeError("Buffer-backed texture array changed or is unmapped");
+                        bool downloaded = false;
                         if (index == 0) {
+                            downloaded = !SkipHandleTableDownload(base);
                             GPUVAddr expected = base;
                             for (const auto& [range_address, range_size] : gpu_memory->GetSubmappedRange(base, source.size)) {
                                 const auto device_address = gpu_memory->GpuToCpuAddress(range_address);
                                 if (range_address != expected || !range_size || !device_address)
                                     throw Shader::RuntimeError("Unmapped texture-handle buffer segment");
                                 namespace BackStats = VideoCommon::BackStats;
+                                if (!downloaded) {
+                                    expected += range_size;
+                                    continue;
+                                }
                                 const u64 download_start = BackStats::Enabled() ? BackStats::Stamp() : 0;
                                 buffer_cache.DownloadMemory(*device_address, range_size);
                                 if (download_start != 0) {
@@ -539,7 +611,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                             u64{desc.count} * source.stride + (std::max)(source.offset, source.stride) + 8);
                         buffer_texture_bytes.resize(span);
                         gpu_memory->ReadBlockUnsafe(base, buffer_texture_bytes.data(), span);
-                        if (index == 0 && VideoCommon::BackStats::Enabled()) {
+                        if (downloaded) {
+                            NoteHandleTableDownload(base, buffer_texture_bytes);
+                        }
+                        if (index == 0 && downloaded && VideoCommon::BackStats::Enabled()) {
                             NoteHandleTableBytes(base, buffer_texture_bytes);
                         }
                     }
