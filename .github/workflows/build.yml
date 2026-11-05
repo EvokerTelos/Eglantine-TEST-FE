@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Test builds for testers: Linux AppImage and Windows zip. Linux follows Eden-CI's AppImage
+# recipe (Arch container, quick-sharun); Windows matches the verified local MSVC build.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux AppImage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    container:
+      image: ghcr.io/pkgforge-dev/archlinux:latest
+      options: --privileged --device /dev/fuse
+    defaults:
+      run:
+        shell: bash
+    env:
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trust the checkout
+        run: |
+          git config --global --add safe.directory '*'
+          # github.workspace is the host path inside containers; use the container's own.
+          echo "CCACHE_DIR=$PWD/.ccache" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          for _ in 1 2 3; do
+            if pacman -Syu --noconfirm --needed --overwrite '*' \
+                base-devel boost boost-libs catch2 ccache cmake curl enet ffnvcodec-headers fmt \
+                gamemode git glslang jq libva libvdpau libvpx libxcursor libxss nasm ninja \
+                nlohmann-json patchelf pulseaudio pulseaudio-alsa python-requests qt6-base \
+                qt6-charts qt6-tools qt6-wayland spirv-headers spirv-tools unzip \
+                vulkan-headers vulkan-mesa-layers vulkan-utility-libraries wget xcb-util-cursor \
+                xcb-util-image xcb-util-renderutil xcb-util-wm zip; then break; fi
+          done
+          wget -q --retry-connrefused --tries=30 \
+            https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/refs/heads/main/useful-tools/get-debloated-pkgs.sh
+          chmod +x get-debloated-pkgs.sh
+          ./get-debloated-pkgs.sh --add-mesa qt6-base-mini libxml2-mini opus-nano
+
+      - name: CPM cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/cpm
+          key: cpm-linux-${{ hashFiles('**/cpmfile.json') }}
+          restore-keys: cpm-linux-
+
+      - name: Compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-linux-${{ github.sha }}
+          restore-keys: ccache-linux-
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=OFF -DENABLE_QT_TRANSLATION=OFF \
+            -DENABLE_UPDATE_CHECKER=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_LTO=OFF \
+            -DYUZU_USE_BUNDLED_FFMPEG=ON -DYUZU_USE_BUNDLED_SIRIT=ON \
+            -DYUZU_USE_BUNDLED_OPENSSL=ON -DYUZU_USE_BUNDLED_SDL3=ON \
+            -DYUZU_DISABLE_LLVM=ON -DYUZU_CMD=ON -DYUZU_ROOM_STANDALONE=OFF \
+            -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF -DDYNARMIC_TESTS=OFF -DENABLE_WERROR=OFF
+
+      - name: Build
+        run: |
+          cmake --build build --target yuzu yuzu-cmd
+          ccache -s
+
+      - name: Package
+        run: |
+          export ICON="$PWD/dist/dev.eden_emu.eden.svg"
+          export DESKTOP="$PWD/dist/dev.eden_emu.eden.desktop"
+          export OPTIMIZE_LAUNCH=1 DEPLOY_OPENGL=1 DEPLOY_VULKAN=1
+          export ADD_HOOKS="wayland-is-broken.hook"
+          export OUTPATH="$PWD/artifacts"
+          export OUTNAME="eden-ns2-fe-linux-${GITHUB_SHA::7}-x86_64.AppImage"
+          curl -fL --retry 30 -o quick-sharun \
+            https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/refs/heads/main/useful-tools/quick-sharun.sh
+          chmod a+x quick-sharun
+          ./quick-sharun build/bin/eden build/bin/eden-cli
+          ./quick-sharun --make-appimage
+          rm -f "$OUTPATH"/*.zsync
+          cp dist/testers/README-linux.txt "$OUTPATH/README.txt"
+          cp LICENSE.txt "$OUTPATH/"
+          ls -la "$OUTPATH"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eden-ns2-fe-linux-x86_64
+          path: artifacts/
+          retention-days: 30
+
+  windows:
+    name: Windows
+    runs-on: windows-2022
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: CPM cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/cpm
+          key: cpm-windows-${{ hashFiles('**/cpmfile.json') }}
+          restore-keys: cpm-windows-
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: 6.8.3
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install Vulkan SDK
+        shell: powershell
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          # CPM applies patches with Git's patch.exe; append so Git's link.exe never shadows MSVC's.
+          $env:PATH = "$env:PATH;C:\Program Files\Git\usr\bin"
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo `
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=OFF "-DQt6_DIR=$env:QT_ROOT_DIR/lib/cmake/Qt6" `
+            -DCPMUTIL_FORCE_BUNDLED=ON -DYUZU_CMD=ON -DYUZU_ROOM=OFF `
+            -DBUILD_TESTING=OFF -DYUZU_TESTS=OFF -DDYNARMIC_TESTS=OFF `
+            -DENABLE_CUBEB=OFF -DENABLE_RESHADE=OFF -DENABLE_OPENGL=OFF `
+            -DENABLE_WEB_SERVICE=OFF -DENABLE_LTO=OFF -DYUZU_DISABLE_LLVM=ON -DENABLE_WERROR=OFF
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:PATH;C:\Program Files\Git\usr\bin"
+          cmake --build build --target yuzu yuzu-cmd
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "eden-ns2-fe-windows-$($env:GITHUB_SHA.Substring(0, 7))"
+          $pkg = "artifacts/$name"
+          New-Item -ItemType Directory -Force $pkg, symbols | Out-Null
+          Copy-Item build/bin/eden.exe, build/bin/eden-cli.exe $pkg
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-compiler-runtime --no-opengl-sw --no-translations "$pkg/eden.exe"
+          Copy-Item "$env:VCToolsRedistDir/x64/Microsoft.VC143.CRT/*.dll" $pkg
+          Copy-Item LICENSE.txt $pkg
+          Copy-Item LICENSES "$pkg/LICENSES" -Recurse
+          Copy-Item dist/testers/README-windows.txt "$pkg/README.txt"
+          Copy-Item build/bin/eden.pdb, build/bin/eden-cli.pdb, build/bin/eden.exe, build/bin/eden-cli.exe symbols
+          Get-ChildItem $pkg | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eden-ns2-fe-windows-x64
+          path: artifacts/
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eden-ns2-fe-windows-x64-symbols
+          path: symbols/
+          retention-days: 90
