@@ -6,7 +6,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'fefw*']
   workflow_dispatch:
 
 concurrency:
@@ -16,6 +16,7 @@ concurrency:
 jobs:
   linux:
     name: Linux AppImage
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     container:
