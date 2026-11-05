@@ -573,16 +573,21 @@ std::vector<std::string> ProfileManager::FindOrphanedProfiles()
                         if (file.is_regular_file() || Common::FS::IsSymlink(file.path()))
                             return false;
                     }
-                } catch (const fs::filesystem_error& e) {
-                    // if we get an error--no worries, just pretend it's not empty
-                    return true;
+                } catch (const fs::filesystem_error&) {
+                    // can't read it: keep it rather than risk deleting saves
+                    return false;
                 }
 
                 return true;
             }();
 
             if (is_empty) {
-                fs::remove_all(entry);
+                std::error_code ec;
+                fs::remove_all(entry, ec);
+                if (ec) {
+                    LOG_WARNING(Service_ACC, "Could not remove empty profile folder {}: {}",
+                                entry.path().string(), ec.message());
+                }
                 return true;
             }
 
