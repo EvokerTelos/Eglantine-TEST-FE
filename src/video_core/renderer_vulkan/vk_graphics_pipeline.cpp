@@ -104,11 +104,18 @@ u32 HandleSpeculationInterval() {
 }
 
 HandleTableSpeculation& HandleSpeculationSlot(GPUVAddr base) {
+    // Tables are page aligned, so look the base up instead of indexing by its bits: a few
+    // tables read in turn each frame must keep their own streaks.
     static thread_local std::array<HandleTableSpeculation, 16> slots{};
-    HandleTableSpeculation& slot = slots[(base >> 8) & (slots.size() - 1)];
-    if (slot.base != base) {
-        slot = {base, 0, 0, 0, false};
+    static thread_local size_t next_victim = 0;
+    for (HandleTableSpeculation& slot : slots) {
+        if (slot.base == base) {
+            return slot;
+        }
     }
+    HandleTableSpeculation& slot = slots[next_victim];
+    next_victim = (next_victim + 1) % slots.size();
+    slot = {base, 0, 0, 0, false};
     return slot;
 }
 
