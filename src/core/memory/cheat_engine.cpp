@@ -5,6 +5,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <locale>
+#include <string_view>
+#include <cstdlib>
+#include <array>
+#include <algorithm>
 #include "common/hex_util.h"
 #include "common/swap.h"
 #include "core/arm/debug.h"
@@ -18,6 +22,7 @@
 #include "core/hle/service/sm/sm.h"
 #include "core/memory.h"
 #include "core/memory/cheat_engine.h"
+#include "core/perf_stats.h"
 #include "hid_core/resource_manager.h"
 #include "hid_core/resources/npad/npad.h"
 
@@ -295,11 +300,123 @@ void CheatEngine::FrameCallback(std::chrono::nanoseconds ns_late) {
         vm.LoadProgram(cheats);
     }
 
-    if (vm.GetProgramSize() == 0) {
+    // The governor decides from the field as the game left it, before a cheat overwrites it, and
+    // puts its value back after the cheats so that is what the game reads.
+    GovernFortunesWeaveFrameRate();
+    if (vm.GetProgramSize() != 0) {
+        vm.Execute(metadata);
+        ReapplyFortunesWeaveFrameRate();
+    }
+}
+
+void CheatEngine::ReapplyFortunesWeaveFrameRate() {
+    if (governor.mode <= 0 || governor.field == 0) {
+        return;
+    }
+    auto& memory = system.ApplicationMemory();
+    if (memory.IsValidVirtualAddress(governor.field) && memory.Read32(governor.field) != governor.target) {
+        memory.Write32(governor.field, governor.target);
+    }
+}
+
+/// Fortune's Weave (main DB93B0125F485060, v131072) steps its logic by 60 / target, where target is
+/// +0x1dc of the graphics object at [main + 0x21e60d8] (the 60fps cheat writes 60 there). With 60
+/// asked and fewer frames delivered, the game runs slow; with 30 it never shows more than 30.
+/// The governor asks for 60 while the emulator delivers it and for 30 when it falls short, and
+/// from 30 tries 60 again now and then (and whenever the game itself rewrites the field, i.e. on
+/// a scene change); a failed try backs off up to a minute. It runs after the cheats, so its value
+/// is the one the game reads. EDEN_FE_FPS=adaptive (default when a cheat is loaded for this
+/// build), 60, 30 or off (leave the field to the game and the cheats).
+void CheatEngine::GovernFortunesWeaveFrameRate() {
+    using namespace std::chrono;
+    constexpr u64 graphics_pointer = 0x21e60d8;
+    constexpr u64 target_field = 0x1dc;
+    auto& g = governor;
+    if (g.mode == -1) {
+        static constexpr std::array<u8, 8> build{0xDB, 0x93, 0xB0, 0x12, 0x5F, 0x48, 0x50, 0x60};
+        const bool this_game = std::equal(build.begin(), build.end(),
+                                          metadata.main_nso_build_id.begin());
+        const char* const env = std::getenv("EDEN_FE_FPS");
+        const std::string_view value = env != nullptr ? env : "adaptive";
+        g.mode = !this_game || value == "off" ? 0 : value == "60" ? 60 : value == "30" ? 30 : 1;
+        if (g.mode != 0) {
+            LOG_INFO(CheatEngine, "Fortune's Weave frame-rate governor: {}",
+                     g.mode == 1 ? "adaptive" : value);
+        }
+    }
+    if (g.mode == 0 || metadata.main_nso_extents.size == 0) {
+        return;
+    }
+    auto& memory = system.ApplicationMemory();
+    const VAddr pointer_address = metadata.main_nso_extents.base + graphics_pointer;
+    if (!memory.IsValidVirtualAddress(pointer_address)) {
+        return;
+    }
+    const u64 graphics = memory.Read64(pointer_address);
+    if (graphics == 0 || !memory.IsValidVirtualAddress(graphics + target_field)) {
+        return;
+    }
+    const VAddr field = graphics + target_field;
+    g.field = field;
+    if (g.mode != 1) {
+        g.target = static_cast<u32>(g.mode);
+        memory.Write32(field, g.target);
         return;
     }
 
-    vm.Execute(metadata);
+    const auto now = steady_clock::now();
+    const u64 frames = system.GetPerfStats().GetTotalGameFrames();
+    const u32 current = memory.Read32(field);
+    if (g.last_written != 0 && current != g.last_written && g.target == 30) {
+        // The game rewrote the field (a new scene): try 60 there right away.
+        g.next_probe = now;
+        g.backoff = seconds{10};
+    }
+    if (g.window_start == steady_clock::time_point{}) {
+        g.window_start = now;
+        g.window_frames = frames;
+    }
+    const auto window = now - g.window_start;
+    if (window >= milliseconds{500}) {
+        const double fps = static_cast<double>(frames - g.window_frames) /
+                           duration<double>(window).count();
+        g.window_start = now;
+        g.window_frames = frames;
+        if (g.target == 60) {
+            if (g.probing && g.probe_windows++ == 0) {
+                // The first window after asking for 60 still holds frames paced for 30.
+            } else if (g.probing) {
+                g.probing = false;
+                if (fps < 55.0) {
+                    g.target = 30;
+                    g.next_probe = now + g.backoff;
+                    g.backoff = std::min<seconds>(g.backoff * 2, seconds{60});
+                    LOG_INFO(CheatEngine, "FE governor: 60 not reached ({:.1f} fps), 30", fps);
+                } else {
+                    g.backoff = seconds{10};
+                    LOG_INFO(CheatEngine, "FE governor: 60 holds ({:.1f} fps)", fps);
+                }
+            } else if (fps < 52.0) {
+                if (++g.low_windows >= 2) {
+                    g.target = 30;
+                    g.low_windows = 0;
+                    g.next_probe = now + g.backoff;
+                    LOG_INFO(CheatEngine, "FE governor: {:.1f} fps, 30", fps);
+                }
+            } else {
+                g.low_windows = 0;
+            }
+        } else if (now >= g.next_probe) {
+            g.target = 60;
+            g.probing = true;
+            g.probe_windows = 0;
+            g.low_windows = 0;
+        }
+    }
+    if (current != g.target) {
+        memory.Write32(field, g.target);
+    }
+    g.last_written = g.target;
 }
 
 } // namespace Core::Memory

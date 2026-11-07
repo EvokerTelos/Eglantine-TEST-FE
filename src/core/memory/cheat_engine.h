@@ -84,6 +84,23 @@ public:
 
 private:
     void FrameCallback(std::chrono::nanoseconds ns_late);
+    void GovernFortunesWeaveFrameRate();
+    void ReapplyFortunesWeaveFrameRate();
+
+    /// Fortune's Weave frame-rate governor (see GovernFortunesWeaveFrameRate).
+    struct FrameRateGovernor {
+        int mode = -1; ///< -1 not decided, 0 off, 30/60 fixed, 1 adaptive
+        u32 target = 60;
+        u32 last_written = 0;
+        u32 low_windows = 0;
+        u32 probe_windows = 0;
+        bool probing = false;
+        VAddr field = 0;
+        std::chrono::steady_clock::time_point window_start{};
+        u64 window_frames = 0;
+        std::chrono::steady_clock::time_point next_probe{};
+        std::chrono::seconds backoff{10};
+    } governor;
 
     DmntCheatVm vm;
     CheatProcessMetadata metadata;
