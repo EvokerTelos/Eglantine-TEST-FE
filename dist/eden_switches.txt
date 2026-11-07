@@ -1,0 +1,12 @@
+# Interruptores del fork FEFW. Pon este archivo junto a eden.exe (o en user\eden_switches.txt).
+# Una linea NOMBRE=VALOR; las lineas con # se ignoran. Reinicia el emulador al cambiarlo.
+# Si abres desde PowerShell con $env:NOMBRE, eso gana sobre este archivo.
+
+# Fortune's Weave: adaptive (60 donde alcanza, 30 donde no), 60, 30 u off.
+#EDEN_FE_FPS=adaptive
+
+# Medidor de rendimiento en el log (cada 4 s). Cuesta ~1-2%.
+#EDEN_BACK_THREAD_STATS=1
+
+# Tabla de texturas: verificar 1 de cada N lecturas (0 = siempre descargar).
+#EDEN_HANDLE_SPECULATE=4

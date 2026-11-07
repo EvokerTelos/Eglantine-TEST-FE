@@ -168,6 +168,7 @@ jobs:
           & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-compiler-runtime --no-opengl-sw --no-translations "$pkg/eden.exe"
           Copy-Item "$env:VCToolsRedistDir/x64/Microsoft.VC143.CRT/*.dll" $pkg
           Copy-Item LICENSE.txt $pkg
+          Copy-Item dist/eden_switches.txt $pkg
           Copy-Item LICENSES "$pkg/LICENSES" -Recurse
           Copy-Item dist/testers/README-windows.txt "$pkg/README.txt"
           Copy-Item build/bin/eden.pdb, build/bin/eden-cli.pdb, build/bin/eden.exe, build/bin/eden-cli.exe symbols

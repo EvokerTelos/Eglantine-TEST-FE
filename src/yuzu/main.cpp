@@ -77,7 +77,65 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 #endif
 }
 
+#ifdef _WIN32
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <string>
+#include "common/fs/path_util.h"
+
+// Environment switches (EDEN_FE_FPS, EDEN_BACK_THREAD_STATS, EDEN_HANDLE_SPECULATE...) can't be set
+// on a double-click launch. eden_switches.txt next to eden.exe, then user\eden_switches.txt (the
+// later wins), holds NAME=VALUE lines, '#' comments; a variable already in the real environment
+// (a PowerShell launch) always wins. Ported from Eglantine's nx2_switches.txt.
+static void ParseSwitchFile(const std::filesystem::path& path,
+                            std::map<std::string, std::string>& entries) {
+    std::ifstream file{path};
+    if (!file) {
+        return;
+    }
+    constexpr const char* blank = " \t\r";
+    std::string line;
+    while (std::getline(file, line)) {
+        line.erase(0, line.find_first_not_of(blank));
+        line.erase(line.find_last_not_of(blank) + 1);
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        std::string name = line.substr(0, eq);
+        std::string value = line.substr(eq + 1);
+        name.erase(name.find_last_not_of(blank) + 1);
+        value.erase(0, value.find_first_not_of(blank));
+        if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+            value = value.substr(1, value.size() - 2);
+        }
+        if (!name.empty()) {
+            entries.insert_or_assign(std::move(name), std::move(value));
+        }
+    }
+}
+
+static void LoadSwitchFiles() {
+    std::map<std::string, std::string> entries;
+    const auto exe_dir = Common::FS::GetExeDirectory();
+    ParseSwitchFile(exe_dir / "eden_switches.txt", entries);
+    ParseSwitchFile(exe_dir / "user" / "eden_switches.txt", entries);
+    for (const auto& [name, value] : entries) {
+        if (std::getenv(name.c_str()) == nullptr) {
+            _putenv_s(name.c_str(), value.c_str());
+        }
+    }
+}
+#endif
+
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    LoadSwitchFiles();
+#endif
 #if YUZU_ROOM
     bool launch_room = false;
     for (int i = 1; i < argc; i++) {
